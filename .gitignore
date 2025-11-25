@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Pyright / mypy
+.mypy_cache/
+.pyre/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Docker
+docker-compose.override.yml
+
+# Local environment variables (do NOT commit secrets)
+.env
+.env.local
+.env.*
+# But keep the example env file in repo
+!.env.example
+
+# Database files
+*.sqlite3
+
+# Misc
+*.bak
+*.swp
+
+# Optional: secrets stored by macOS keychain helper, CI caches, etc.
+
+# End of .gitignore

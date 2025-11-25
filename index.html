@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Realtime Bus Demo - Mapbox + deck.gl</title>
+
+    <!-- Mapbox GL JS CSS -->
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.css" rel="stylesheet" />
+
+    <style>
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #topbar {
+            padding: 0.5rem 1rem;
+            background: #111827;
+            color: #e5e7eb;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        #map {
+            flex: 1;
+            position: relative;
+        }
+
+        #sidebar {
+            position: absolute;
+            top: 3rem;
+            left: 0.5rem;
+            background: rgba(15, 23, 42, 0.9);
+            color: #e5e7eb;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            max-width: 280px;
+            max-height: 42vh;
+            overflow-y: auto;
+            z-index: 10;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        }
+
+        pre {
+            margin: 0.5rem 0 0 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        #show-path-btn {
+            padding: 0.35rem 0.6rem;
+            border-radius: 0.35rem;
+            border: 1px solid #334155;
+            background: #0f172a;
+            color: #e2e8f0;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+
+        #show-path-btn:hover {
+            background: #111827;
+        }
+
+        #status {
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="topbar">
+        <div>Realtime Bus Demo (Mapbox standard + deck.gl paths)</div>
+        <div>
+            <button id="show-path-btn">Show all buses last 10 min</button>
+            <span id="status" style="margin-left: 0.75rem;">WebSocket: connecting...</span>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <div id="sidebar">
+        <div><strong>Latest buses</strong></div>
+        <pre id="log"></pre>
+    </div>
+
+    <!-- Mapbox GL JS -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.2.0/mapbox-gl.js"></script>
+    <!-- deck.gl -->
+    <script src="https://unpkg.com/deck.gl@^8.9.0/dist.min.js"></script>
+
+    <script>
+        // ===== Mapbox token: fetch from API (reads MAPBOX_TOKEN from server .env) =====
+        // The API endpoint `/api/config` returns JSON like { mapbox_token: "..." }
+        let map; // will be initialized after token is fetched
+
+        async function initMap() {
+            try {
+                const res = await fetch('http://localhost:8000/api/config');
+                if (res.ok) {
+                    const cfg = await res.json();
+                    mapboxgl.accessToken = cfg.mapbox_token || '';
+                } else {
+                    console.warn('Failed to fetch config, status=', res.status);
+                }
+            } catch (e) {
+                console.warn('Could not fetch /api/config, falling back to placeholder token', e);
+            }
+
+            // If token still empty use placeholder (will show attribution errors if invalid)
+            if (!mapboxgl.accessToken) {
+                mapboxgl.accessToken = 'your_mapbox_token_here';
+            }
+
+            // ===== Map init =====
+            map = new mapboxgl.Map({
+                container: "map",
+                style: "mapbox://styles/mapbox/standard",
+                center: [121.5170, 25.0478],
+                zoom: 12.5
+            });
+
+            // 1) Desaturate (keep the existing approach)
+            map.on("load", () => {
+                map.addLayer({
+                    id: "desaturate-overlay",
+                    type: "background",
+                    paint: {
+                        "background-color": "rgba(255, 255, 255, 0.5)"
+                    }
+                });
+            });
+
+            // 2) Disable POI labels (prevent red POI markers from distracting)
+            map.on("style.load", () => {
+                map.setConfigProperty("basemap", "showPointOfInterestLabels", false);
+            });
+            // Start WebSocket after the map is ready to avoid race conditions
+            if (typeof startWebSocket === 'function') startWebSocket();
+        }
+
+        // start map initialization
+        initMap();
+
+        // ===== UI elements =====
+        const statusEl = document.getElementById("status");
+        const logEl = document.getElementById("log");
+
+        let latestBusesSnapshot = [];
+        let busPathLayer = null; // deck PathLayer for history
+
+        // Mapbox markers for realtime
+        const busMarkers = {};  // {bus_id: Marker}
+
+        function updateSidebar(data) {
+            logEl.textContent = JSON.stringify(data, null, 2);
+        }
+
+        // ===== realtime markers (Mapbox) =====
+        function upsertBusMarkers(buses) {
+            buses.forEach(bus => {
+                const id = bus.bus_id;
+                const lon = Number(bus.lon);
+                const lat = Number(bus.lat);
+                if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
+                if (busMarkers[id]) {
+                    busMarkers[id].setLngLat([lon, lat]);
+                } else {
+                    // marker element: red dot with white border (more visible)
+                    const el = document.createElement("div");
+                    el.style.width = "14px";
+                    el.style.height = "14px";
+                    el.style.borderRadius = "999px";
+                    el.style.background = "#ef4444";
+                    el.style.border = "2px solid white";
+                    el.style.boxShadow = "0 0 8px rgba(0,0,0,0.35)";
+
+                    const marker = new mapboxgl.Marker(el)
+                        .setLngLat([lon, lat])
+                        .setPopup(
+                            new mapboxgl.Popup({ offset: 12 }).setHTML(
+                                `<strong>${id}</strong><br/>${lat.toFixed(5)}, ${lon.toFixed(5)}`
+                            )
+                        )
+                        .addTo(map);
+
+                    busMarkers[id] = marker;
+                }
+            });
+        }
+
+        // ===== history fetching =====
+        async function fetchBusHistory(busId, minutes = 10) {
+            const url = `http://localhost:8000/api/history?bus_id=${encodeURIComponent(busId)}&minutes=${minutes}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`History API failed: ${res.status}`);
+            return await res.json();
+        }
+
+        // ===== deck.gl PathLayer for ALL buses =====
+        function updateBusPathLayerForAllBuses(layerData) {
+            if (!busPathLayer) {
+                busPathLayer = new deck.MapboxLayer({
+                    id: "bus-path-layer",
+                    type: deck.PathLayer,
+                    data: layerData,
+                    getPath: d => d.path,
+                    getWidth: 4,
+                    widthUnits: "pixels",
+                    getColor: d => d.color,
+                    rounded: true,
+                    capRounded: true,
+                    jointRounded: true
+                });
+                map.addLayer(busPathLayer);
+            } else {
+                busPathLayer.setProps({ data: layerData });
+            }
+        }
+
+        async function handleShowPathClick() {
+            if (!latestBusesSnapshot || latestBusesSnapshot.length === 0) {
+                alert("No buses available right now.");
+                return;
+            }
+
+            const minutes = 10;
+            const busIds = [...new Set(latestBusesSnapshot.map(b => b.bus_id))];
+
+            const baseColors = [
+                [0, 255, 255, 200],
+                [255, 99, 132, 200],
+                [255, 206, 86, 200],
+                [75, 192, 192, 200],
+                [54, 162, 235, 200],
+                [153, 102, 255, 200]
+            ];
+
+            const layerData = [];
+
+            for (let i = 0; i < busIds.length; i++) {
+                const busId = busIds[i];
+                try {
+                    const history = await fetchBusHistory(busId, minutes);
+                    if (!history || history.length === 0) continue;
+
+                    const pathCoords = history
+                        .map(p => [Number(p.lon), Number(p.lat)])
+                        .filter(([lon, lat]) => Number.isFinite(lon) && Number.isFinite(lat));
+
+                    if (pathCoords.length < 2) continue;
+
+                    layerData.push({
+                        bus_id: busId,
+                        path: pathCoords,
+                        color: baseColors[i % baseColors.length]
+                    });
+                } catch (err) {
+                    console.error(`Failed to fetch history for ${busId}:`, err);
+                }
+            }
+
+            if (layerData.length === 0) {
+                alert(`No history for any bus in last ${minutes} minutes.`);
+                return;
+            }
+
+            updateBusPathLayerForAllBuses(layerData);
+        }
+
+        document.getElementById("show-path-btn")
+            .addEventListener("click", handleShowPathClick);
+
+        // ===== WebSocket realtime =====
+        function startWebSocket() {
+            const ws = new WebSocket("ws://localhost:8000/ws/buses");
+
+            ws.onopen = () => {
+                statusEl.textContent = "WebSocket: connected";
+                statusEl.style.color = "#4ade80";
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data); // array
+
+                    updateSidebar(data);
+                    latestBusesSnapshot = data;
+
+                    // realtime points by Mapbox markers
+                    upsertBusMarkers(data);
+
+                    // center once if only one bus
+                    if (data.length === 1 && !map.__centeredOnce) {
+                        const bus = data[0];
+                        if (map) {
+                            map.jumpTo({ center: [bus.lon, bus.lat], zoom: 14 });
+                            map.__centeredOnce = true;
+                        }
+                    }
+
+                } catch (e) {
+                    console.error("Failed to parse WebSocket message", e);
+                }
+            };
+
+            ws.onclose = () => {
+                statusEl.textContent = "WebSocket: disconnected";
+                statusEl.style.color = "#f97316";
+            };
+        }
+    </script>
+</body>
+
+</html>
